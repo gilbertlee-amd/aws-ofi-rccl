@@ -15,6 +15,96 @@
 #include <stack.h>
 #include <nccl_ofi_param.h>
 #include <sys/time.h>
+#include <pthread.h>
+
+typedef struct
+{
+  int direction;
+  int id;
+  int instance;
+  int testCount;
+
+  struct timeval startTime;
+  float delta;
+} ReqInfo;
+
+enum RequestDir
+{
+  DIR_UNSET = 0,
+  DIR_SEND  = 1,
+  DIR_RECV  = 2
+};
+
+#define MAX_REQUESTS 1000
+ReqInfo* GetReqInfo(void* request)
+{
+  static void*   reqList[MAX_REQUESTS] = {};
+  static ReqInfo infList[MAX_REQUESTS] = {};
+  static int     numRequests           = 0;
+
+  for (int i = 0; i < numRequests; ++i)
+  {
+    if (reqList[i] == request)
+      return &infList[i];
+  }
+  if (numRequests >= MAX_REQUESTS)
+  {
+    printf("[PI] Too many requests. Increase limit\n");
+    exit(1);
+  }
+  reqList[numRequests] = request;
+  return &infList[numRequests++];
+}
+
+void TrackSendRequest(void *request)
+{
+  static int sendCounter = 0;
+  ReqInfo* info = GetReqInfo(request);
+  gettimeofday(&info->startTime, NULL);
+  if (info->direction == DIR_UNSET)
+  {
+    info->direction = DIR_SEND;
+    info->id        = ++sendCounter;
+    info->instance  = 1;
+  }
+  else
+  {
+    info->instance++;
+    info->testCount = 0;
+  }
+}
+
+void TrackRecvRequest(void *request)
+{
+  static int recvCounter = 0;
+  ReqInfo* info = GetReqInfo(request);
+  gettimeofday(&info->startTime, NULL);
+  if (info->direction == DIR_UNSET)
+  {
+    info->direction = DIR_RECV;
+    info->id        = ++recvCounter;
+    info->instance  = 1;
+  }
+  else
+  {
+    info->instance++;
+    info->testCount = 0;
+  }
+}
+
+void TrackTestRequest(void *request)
+{
+  ReqInfo* info = GetReqInfo(request);
+  info->testCount++;
+}
+
+void TrackDoneRequest(void *request)
+{
+  ReqInfo* info = GetReqInfo(request);
+  struct timeval tv;
+  gettimeofday(&tv, NULL);
+  info->delta = (tv.tv_sec  - info->startTime.tv_sec)*1E6 + (tv.tv_usec - info->startTime.tv_usec);
+}
 
 static uint32_t libversion = 0;
 /* NICs info list for a provider */
@@ -2585,6 +2675,14 @@ error:
 	if (req)
 		free_nccl_ofi_req(req, false);
 exit:
+  TrackSendRequest(req);
+  ReqInfo* info = GetReqInfo(req);
+  printf("[P]"
+         "                       |"
+         "Send %c%-4d [T%8d] |"
+         "\n"
+         , info->id + 'A' - 1, info->instance, (int)gettid());
+  fflush(stdout);
 	return ret;
 }
 
@@ -2705,6 +2803,14 @@ error:
 	if (req)
 		free_nccl_ofi_req(req, false);
 exit:
+  TrackRecvRequest(req);
+  ReqInfo* info = GetReqInfo(req);
+  printf("[P]"
+         "Recv %c%-4d [T%8d] |"
+         "                       |"
+         "\n"
+         , info->id + 'A' - 1, info->instance, gettid());
+  fflush(stdout);
 	return ret;
 }
 
@@ -2721,11 +2827,22 @@ static ncclResult_t ofi_test(void* request, int* done, int* size)
 	nccl_ofi_req_t *req = (nccl_ofi_req_t *)request;
 	nccl_ofi_t *nccl_ofi_comp = NULL;
 
+  TrackTestRequest(request);
+
     struct timeval tv;
     gettimeofday(&tv, NULL);
     float delta = (tv.tv_sec - req->tv.tv_sec)*1E6 + tv.tv_usec - req->tv.tv_usec;
     static float prev_delta = 0;
     if (delta - prev_delta > 1E6) {
+      ReqInfo* info = GetReqInfo(request);
+      printf("[P]"
+             "                       |"
+             "                       |"
+             "%4s %c%-4d timeouts\n",
+             info->direction == DIR_SEND ? "Send" :
+             info->direction == DIR_RECV ? "Recv" : "ERR!",
+             info->id + 'A' - 1, info->instance);
+
 		NCCL_OFI_WARN("Request %p %s timeout after %f us",
 			req,
 			nccl_ofi_request_str(req),
@@ -2753,6 +2870,16 @@ static ncclResult_t ofi_test(void* request, int* done, int* size)
 			*size = req->size;
 		/* Mark as done */
 		*done = 1;
+    TrackDoneRequest(request);
+    ReqInfo* info = GetReqInfo(request);
+    printf("[P]"
+           "                       |"
+           "                       |"
+           "%4s %c%-4d done after %8.0f us %8d tests [T%8d]"
+           "\n",
+           info->direction == DIR_SEND ? "Send" :
+           info->direction == DIR_RECV ? "Recv" : "ERR!",
+           info->id + 'A' - 1, info->instance, info->delta, info->testCount, gettid());
 		free_nccl_ofi_req(req, true);
 	}
 	else
