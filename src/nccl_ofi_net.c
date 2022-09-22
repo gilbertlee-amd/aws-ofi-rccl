@@ -35,6 +35,49 @@ enum RequestDir
   DIR_RECV  = 2
 };
 
+uint64_t GetTimeStamp()
+{
+  struct timeval currTime;
+  gettimeofday(&currTime, NULL);
+  return currTime.tv_sec * 1000000L + currTime.tv_usec;
+}
+
+#define MAX_ENDPOINTS 1000
+int GetEndPointNumber(unsigned long ep)
+{
+  static unsigned long epList[MAX_ENDPOINTS] = {};
+  static int listSize = 0;
+
+  for (int i = 0; i < listSize; ++i)
+    if (epList[i] == ep) return i;
+  if (listSize >= MAX_ENDPOINTS)
+  {
+    printf("[P] Too many threads. Increase limit\n");
+    exit(1);
+  }
+  epList[listSize] = ep;
+  return listSize++;
+}
+
+#define MAX_THREADS 100
+int GetThreadNumber()
+{
+  static int tidList[MAX_THREADS] = {};
+  static int listSize = 0;
+
+  int tid = gettid();
+  for (int i = 0; i < listSize; ++i)
+    if (tidList[i] == tid) return i;
+  if (listSize >= MAX_THREADS)
+  {
+    printf("[P] Too many threads. Increase limit\n");
+    exit(1);
+  }
+  tidList[listSize] = tid;
+  return listSize++;
+}
+
+
 #define MAX_REQUESTS 1000
 ReqInfo* GetReqInfo(void* request)
 {
@@ -49,7 +92,7 @@ ReqInfo* GetReqInfo(void* request)
   }
   if (numRequests >= MAX_REQUESTS)
   {
-    printf("[PI] Too many requests. Increase limit\n");
+    printf("[P] Too many requests. Increase limit\n");
     exit(1);
   }
   reqList[numRequests] = request;
@@ -593,9 +636,10 @@ static ncclResult_t register_mr_buffers(ofiComm_t *comm, void *data,
 			goto exit;
 		}
 	}
-
 	rc = fi_mr_regattr(nccl_ofi_component[comm->dev]->domain,
 			    &mr_attr, 0, mr_handle);
+  printf("[LOG] Call:FI_MR_REGATTR Function:register_mr_buffers Timestamp:%lu Thread:%d rc:%d domain:%p attr:%p flags:%u mr:%p\n", GetTimeStamp(), GetThreadNumber(), rc,
+         nccl_ofi_component[comm->dev]->domain, &mr_attr, 0, mr_handle);
 	if (OFI_UNLIKELY(rc != 0)) {
 		NCCL_OFI_WARN("Unable to register memory (type = %d) for device %d. RC: %d, Error: %s",
 			       type, comm->dev, rc, fi_strerror(-rc));
@@ -666,6 +710,7 @@ static int find_ofi_provider(struct fi_info **providers)
 	/* Get hints for GPUDirect capable provider */
 	get_hints(gdr_hints, true);
 
+  printf("FI_GETINFO %lu\n", GetTimeStamp());
 	rc = fi_getinfo(ofi_version, NULL, NULL, 0ULL, gdr_hints, providers);
 	if (rc == -FI_ENODATA) {
 		NCCL_OFI_TRACE(NCCL_INIT | NCCL_NET,
@@ -677,6 +722,7 @@ static int find_ofi_provider(struct fi_info **providers)
 		/* Re-try finding non-GPUDirect capable provider */
 		get_hints(hints, false);
 
+    printf("FI_GETINFO %lu\n", GetTimeStamp());
 		rc = fi_getinfo(ofi_version, NULL, NULL, 0ULL, hints, providers);
 		if (rc == -FI_ENODATA) {
 			NCCL_OFI_WARN("Couldn't find any optimal provider");
@@ -1080,6 +1126,8 @@ static ncclResult_t ofi_process_cq(nccl_ofi_t *nccl_ofi_comp)
 		/* Receive completions for the given endpoint */
 		rc = fi_cq_read(cq, &cqe_tagged_buffers[0], cqe_burst);
 		if (rc > 0) {
+      printf("[LOG] Call:FI_CQ_READ Function:ofi_process_cq Timestamp:%lu Thread:%d rc:%lu cq:%p buf:%p count:%lu\n", GetTimeStamp(), GetThreadNumber(), rc,
+             cq, &cqe_tagged_buffers[0], cqe_burst);
 			ret = process_completions(
 					&cqe_tagged_buffers[0], rc,
 					control_bit_mask);
@@ -1087,6 +1135,7 @@ static ncclResult_t ofi_process_cq(nccl_ofi_t *nccl_ofi_comp)
 				goto exit;
 		}
 		else if (OFI_UNLIKELY(rc == -FI_EAVAIL)) {
+      printf("FI_CQ_READERR %lu\n", GetTimeStamp());
 			rc = fi_cq_readerr(cq, &err_buffer, 0);
 			if (OFI_UNLIKELY(rc == -FI_EAGAIN)) {
 				/*
@@ -1688,6 +1737,10 @@ static ssize_t send_connect_message(sendComm_t *sComm, nccl_ofi_req_t *req)
 	rc = fi_tsend(sComm->local_ep, (void *)local_ep_addr,
 			MAX_EP_ADDR, NULL, sComm->remote_ep,
 			sComm->tag | (max_tag + 1), &req->ctx);
+  printf("[LOG] Call:FI_TSEND Function:send_connect_message Timestamp:%lu Thread:%d rc:%ld ep:%p data:%p len:%u desc:%p dest_addr:%ld tag:%lu context:%p\n", GetTimeStamp(), GetThreadNumber(), rc,
+         sComm->local_ep, (void *)local_ep_addr,
+         MAX_EP_ADDR, NULL, sComm->remote_ep,
+         sComm->tag | (max_tag + 1), &req->ctx);
 	if (rc == -FI_EAGAIN) {
 		/*
 		 * Process completions so that you have enough
@@ -1991,6 +2044,10 @@ static ncclResult_t ofi_connect(int dev, void *handle, void **sendComm)
 		rc = fi_tsend(sComm->local_ep, (void *)conn_info,
 			      sizeof(*conn_info), NULL, sComm->remote_ep,
 			      sComm->tag | (max_tag + 1), &req->ctx);
+    printf("[LOG] Call:FI_TSEND Function:ofi_connect Timestamp:%lu Thread:%d rc:%d ep:%p len:%p desc:*p dest_addr:%lu tag:%lu context:%p\n", GetTimeStamp(), GetThreadNumber(), rc,
+           sComm->local_ep, (void *)conn_info,
+           sizeof(*conn_info), NULL, sComm->remote_ep,
+           sComm->tag | (max_tag + 1), &req->ctx);
 		if (rc == 0)
 			break;
 		else if (rc == -FI_EAGAIN) {
@@ -2109,6 +2166,10 @@ static ssize_t post_recv_conn(listenComm_t *lComm, char **buffer,
 	rc = fi_trecv(lComm->local_ep, (void *)*buffer, size,
 		      NULL, FI_ADDR_UNSPEC, lComm->tag | (max_tag + 1),
 		      0, &req->ctx);
+  printf("[LOG] Call:FI_TRECV Function:post_recv_conn Timestamp:%lu Thread:%d rc:%ld ep:%p buf:%p len:%lu desc:%p src_addr:%ld tag:%lu ignore:%u context:%p\n", GetTimeStamp(), GetThreadNumber(), rc,
+         lComm->local_ep, (void *)*buffer, size,
+         NULL, FI_ADDR_UNSPEC, lComm->tag | (max_tag + 1),
+         0, &req->ctx);
 	if (rc == -FI_EAGAIN) {
 		/*
 		 * Process completions so that you have enough
@@ -2405,6 +2466,7 @@ static ncclResult_t ofi_accept(void *listenComm, void **recvComm)
 
 	/* Post a buffer for receiving connection requests */
 	do {
+    printf("FI_TRECV %lu\n", GetTimeStamp());
 		rc = fi_trecv(lComm->local_ep, (void *)&conn_info, sizeof(conn_info),
 			      NULL, FI_ADDR_UNSPEC, lComm->tag | (max_tag + 1),
 			      0, &req->ctx);
@@ -2572,6 +2634,7 @@ static ncclResult_t ofi_deregMr(void *comm, void *mhandle)
 		goto exit;
 	}
 
+  printf("FI_CLOSE %lu\n", GetTimeStamp());
 	rc = fi_close((fid_t)mr_handle);
 	if (OFI_UNLIKELY(rc != 0)) {
 		ret = ncclSystemError;
@@ -2652,6 +2715,9 @@ static ncclResult_t ofi_isend(void *sendComm, void* data, int size,
 	 */
 	rc = fi_tsend(sComm->local_ep, data, size, desc,
 		      sComm->remote_ep, sComm->tag, &req->ctx);
+  printf("[LOG] Call:FI_TSEND Function:ofi_send Timestamp:%lu Thread:%d rc:%ld ep:%p data:%p len:%u desc:%p dest_addr:%ld tag:%lu context:%p\n", GetTimeStamp(), GetThreadNumber(), rc,
+         sComm->local_ep, data, size, desc,
+         sComm->remote_ep, sComm->tag, &req->ctx);
 	if (OFI_UNLIKELY(rc == -FI_EAGAIN)) {
 		/* Return NULL */
 		*request = NULL;
@@ -2672,16 +2738,17 @@ static ncclResult_t ofi_isend(void *sendComm, void* data, int size,
 	goto exit;
 
 error:
+  printf("[ERROR] FI_TSEND error\n");
 	if (req)
 		free_nccl_ofi_req(req, false);
 exit:
   TrackSendRequest(req);
   ReqInfo* info = GetReqInfo(req);
-  printf("[P]"
+  printf("[P] %20lu |"
          "                       |"
-         "Send %c%-4d [T%8d] |"
+         "Send %c%cd-3d [T%02d] %8d bytes |"
          "\n"
-         , info->id + 'A' - 1, info->instance, (int)gettid());
+         , GetTimeStamp(), info->id + 'A' - 1, info->instance, GetThreadNumber(), size);
   fflush(stdout);
 	return ret;
 }
@@ -2756,6 +2823,7 @@ static ncclResult_t ofi_irecv(void* recvComm, void* buffer, int size,
 		 */
 
 		/* Try posting buffer to local EP */
+    printf("FI_TRECV %lu %d\n", GetTimeStamp(), GetThreadNumber());
 		rc = fi_trecv(rComm->local_ep, buffers[recv_n], sizes[recv_n],
 			      desc, FI_ADDR_UNSPEC, rComm->tag, 0, &req->ctx);
 		if (rc == -FI_EAGAIN) {
@@ -2777,6 +2845,7 @@ static ncclResult_t ofi_irecv(void* recvComm, void* buffer, int size,
 		desc = fi_mr_desc(mhandle);
 
 	/* Try posting buffer to local EP */
+  printf("FI_TRECV %lu %d\n", GetTimeStamp(), GetThreadNumber());
 	rc = fi_trecv(rComm->local_ep, buffer, size,
 			desc, FI_ADDR_UNSPEC, rComm->tag, 0, &req->ctx);
 	if (rc == -FI_EAGAIN) {
@@ -3018,6 +3087,7 @@ static ncclResult_t ofi_iflush(void* recvComm, void* buffer, int size,
 
 	/* Issue RDMA read */
 	do {
+    printf("FI_READ %lu %d\n", GetTimeStamp(), GetThreadNumber());
 		rc = fi_read(rComm->local_ep, rComm->flush_buff.host_buffer,
 			     rComm->flush_buff.size,
 			     flush_mr_desc,
@@ -3146,6 +3216,7 @@ static ncclResult_t ofi_closeRecv(void *recvComm)
 		/* Deregister Flush buffer memory region */
 		mr_handle = (struct fid_mr *)rComm->flush_buff.mr_handle;
 		if (mr_handle) {
+      printf("FI_CLOSE %lu %d\n", GetTimeStamp(), GetThreadNumber());
 			rc = fi_close((fid_t)mr_handle);
 			if (OFI_UNLIKELY(rc != 0)) {
 				ret = ncclSystemError;
